@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
+use core::ops::Mul;
 ///
 /// This smart contract is developed by Benjamin Gallois (benjamin@gallois.cc).
 ///
@@ -6,7 +7,6 @@
 /// you may not use this file except in compliance with the License.
 /// You may obtain a copy of the License at
 ///
-///     http://www.apache.org/licenses/LICENSE-2.0
 ///
 /// Unless required by applicable law or agreed to in writing, software
 /// distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,7 +25,6 @@
 /// you may not use this file except in compliance with the License.
 /// You may obtain a copy of the License at
 ///
-///     http://www.apache.org/licenses/LICENSE-2.0
 ///
 /// Unless required by applicable law or agreed to in writing, software
 /// distributed under the License is distributed on an "AS IS" BASIS,
@@ -34,7 +33,6 @@
 /// limitations under the License.
 use ink_prelude::string::String;
 use sp_arithmetic::per_things::Perquintill;
-use core::ops::Mul;
 
 #[ink::contract]
 mod packa_pay {
@@ -42,6 +40,7 @@ mod packa_pay {
 
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
+    #[derive(Debug, PartialEq)]
     pub enum Status {
         Initiated,
         Funded,
@@ -49,6 +48,7 @@ mod packa_pay {
 
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
+    #[derive(Debug, PartialEq)]
     pub enum Error {
         PaymentTooLarge,
         PaymentNotAuthorized,
@@ -88,22 +88,27 @@ mod packa_pay {
         status: Status,
         /// The security code that the sender will ship with the package.
         code: Option<Hash>,
+        /// The security amount.
         security_amount: Balance,
+        /// The transaction amount.
+        amount: Balance,
     }
 
     impl PackaPay {
         #[ink(constructor)]
         pub fn new(receiver: AccountId, amount: Balance) -> Self {
             let caller = Self::env().caller();
+            assert!(caller != receiver);
             let security_amount = Perquintill::from_percent(20).mul(amount);
             Self {
                 sender: caller,
-                sender_due_amount: amount.saturating_add(security_amount),
+                sender_due_amount: security_amount,
                 receiver,
-                receiver_due_amount: amount,
+                receiver_due_amount: amount.saturating_add(security_amount),
                 status: Status::Initiated,
                 code: None,
                 security_amount,
+                amount,
             }
         }
 
@@ -130,11 +135,23 @@ mod packa_pay {
             if let Some(stored_hash) = self.code {
                 if stored_hash == hash {
                     self.env()
-                        .transfer(self.env().caller(), self.security_amount)
+                        .transfer(
+                            self.sender,
+                            self.security_amount.saturating_add(self.amount),
+                        )
                         .map_err(|_| Error::InvalidTransaction)?;
+                    self.env()
+                        .transfer(self.receiver, self.security_amount)
+                        .map_err(|_| Error::InvalidTransaction)?;
+
+                    #[cfg(not(test))]
                     self.env().terminate_contract(self.sender);
+
+                    #[cfg(test)]
+                    Ok(())
+                } else {
+                    Err(Error::InvalidCode)
                 }
-                Ok(())
             } else {
                 Err(Error::InvalidCode)
             }
@@ -220,7 +237,7 @@ mod packa_pay {
                     Ok(())
                 }
             } else if caller == self.receiver {
-                if transferred < self.receiver_due_amount {
+                if transferred > self.receiver_due_amount {
                     return Err(Error::PaymentTooLarge);
                 } else {
                     self.receiver_due_amount = self.receiver_due_amount.saturating_sub(transferred);
@@ -233,6 +250,205 @@ mod packa_pay {
             } else {
                 return Err(Error::PaymentNotAuthorized);
             }
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn default_accounts() -> ink::env::test::DefaultAccounts<ink::env::DefaultEnvironment> {
+            ink::env::test::default_accounts::<Environment>()
+        }
+
+        #[ink::test]
+        fn test_successful() {
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(
+                ink_env::account_id::<ink_env::DefaultEnvironment>(),
+                0,
+            );
+
+            let accounts = default_accounts();
+            let sender = accounts.eve;
+            let receiver = accounts.bob;
+
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(sender, 1_000);
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(receiver, 1_000);
+
+            let amount = 100u128;
+            let security_amount = Perquintill::from_percent(20).mul(amount);
+
+            // Initiate contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            let mut contract = PackaPay::new(receiver, amount);
+            assert_eq!(contract.sender, sender);
+            assert_eq!(contract.receiver, receiver);
+            assert_eq!(contract.status, Status::Initiated);
+            assert_eq!(contract.security_amount, security_amount);
+            assert_eq!(contract.amount, amount);
+            assert!(contract.code.is_none());
+            assert_eq!(contract.sender_due_amount, security_amount);
+            assert_eq!(contract.receiver_due_amount, amount + security_amount);
+
+            // Fund contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount),
+                Ok(())
+            );
+
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount + amount),
+                Ok(())
+            );
+            assert_eq!(
+                ink_env::balance::<ink_env::DefaultEnvironment>(),
+                amount + 2 * security_amount
+            );
+
+            // Sign contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(contract.sign("TEST".to_string()), Ok(()));
+
+            // Settle contract
+            let sender_balance =
+                ink_env::test::get_account_balance::<ink_env::DefaultEnvironment>(sender).unwrap();
+            let receiver_balance =
+                ink_env::test::get_account_balance::<ink_env::DefaultEnvironment>(receiver)
+                    .unwrap();
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(contract.settle("TEST".to_string()), Ok(()));
+            assert_eq!(
+                ink_env::test::get_account_balance::<ink_env::DefaultEnvironment>(sender).unwrap(),
+                sender_balance + security_amount + amount
+            );
+            assert_eq!(
+                ink_env::test::get_account_balance::<ink_env::DefaultEnvironment>(receiver)
+                    .unwrap(),
+                receiver_balance + security_amount
+            );
+        }
+
+        #[ink::test]
+        #[should_panic]
+        fn test_origin_constructor() {
+            let accounts = default_accounts();
+            let sender = accounts.eve;
+            let receiver = accounts.bob;
+
+            let amount = 100u128;
+
+            // Initiate contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            let _ = PackaPay::new(sender, amount);
+        }
+
+        #[ink::test]
+        fn test_origin() {
+            let accounts = default_accounts();
+            let sender = accounts.eve;
+            let receiver = accounts.bob;
+            let alice = accounts.alice;
+
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(sender, 1_000);
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(receiver, 1_000);
+
+            let amount = 100u128;
+            let security_amount = Perquintill::from_percent(20).mul(amount);
+
+            // Initiate contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            let mut contract = PackaPay::new(receiver, amount);
+            assert_eq!(contract.sender, sender);
+            assert_eq!(contract.receiver, receiver);
+
+            // Nobody should be able to fund the contract except receiver and sender
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(alice);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount),
+                Err(Error::PaymentNotAuthorized)
+            );
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount),
+                Ok(())
+            );
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount + amount),
+                Ok(())
+            );
+
+            // Nobody should be able to sign contract except sender
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(alice);
+            assert_eq!(contract.sign("TEST".to_string()), Err(Error::NotAuthorized));
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(contract.sign("TEST".to_string()), Err(Error::NotAuthorized));
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(contract.sign("TEST".to_string()), Ok(()));
+
+            // Nobody shoudle be able to settle contract except receiver
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(alice);
+            assert_eq!(
+                contract.settle("TEST".to_string()),
+                Err(Error::NotAuthorized)
+            );
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(
+                contract.settle("TEST".to_string()),
+                Err(Error::NotAuthorized)
+            );
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(contract.settle("TEST".to_string()), Ok(()));
+        }
+
+        #[ink::test]
+        fn test_funding() {
+            let accounts = default_accounts();
+            let sender = accounts.eve;
+            let receiver = accounts.bob;
+
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(sender, 100_000);
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(receiver, 100_000);
+
+            let amount = 100u128;
+            let security_amount = Perquintill::from_percent(20).mul(amount);
+
+            // Initiate contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            let mut contract = PackaPay::new(receiver, amount);
+            assert_eq!(contract.sender, sender);
+            assert_eq!(contract.receiver, receiver);
+
+            // Fail if too many
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount * 10),
+                Err(Error::PaymentTooLarge)
+            );
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), amount * 10),
+                Err(Error::PaymentTooLarge)
+            );
+
+            // Fund by parts
+            for _ in 0..10 {
+                ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+                assert_eq!(contract.sign("TEST".to_string()), Err(Error::FundingNotMet));
+                ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+                assert_eq!(
+                    ink_env::pay_with_call!(contract.fund(), security_amount / 10),
+                    Ok(())
+                );
+                ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+                assert_eq!(
+                    ink_env::pay_with_call!(contract.fund(), (security_amount + amount) / 10),
+                    Ok(())
+                );
+            }
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(contract.sign("TEST".to_string()), Ok(()));
         }
     }
 }
