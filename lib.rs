@@ -42,8 +42,10 @@ mod packa_pay {
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[derive(Debug, PartialEq)]
     pub enum Status {
+        /// Contract is initiated and waiting for funding.
         Initiated,
-        Funded,
+        /// Contract is signed and awaiting settlement.
+        Signed,
     }
 
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -110,6 +112,55 @@ mod packa_pay {
                 security_amount,
                 amount,
             }
+        }
+
+        /// Breaks the contract if certain conditions are met.
+        ///
+        /// This function can only be called by either the `sender` or the `receiver`
+        /// involved in the contract. If the caller is not one of these, an error is returned.
+        ///
+        /// Additionally, the contract can only be broken if the current `status` of the
+        /// contract is `Initiated`. If the contract has already progressed to a later stage,
+        /// an error is returned.
+        ///
+        /// On successful execution, the following occurs:
+        /// 1. The `sender` is refunded any remaining security amount that has not been
+        ///    deducted by their due amount.
+        /// 2. The `receiver` is refunded the security amount plus the full contract
+        ///    amount minus any deductions from their due amount.
+        /// 3. The contract is terminated, returning any remaining balance to the `sender`
+        ///    if the execution is not in a test environment.
+        ///
+        #[ink(message)]
+        pub fn r#break(&mut self) -> Result<()> {
+            let caller = self.env().caller();
+
+            if caller != self.receiver && caller != self.sender {
+                return Err(Error::NotAuthorized);
+            }
+
+            if self.status != Status::Initiated {
+                return Err(Error::NotAuthorized);
+            }
+
+            let sender_amount = self.security_amount.saturating_sub(self.sender_due_amount);
+            let receiver_amount = self
+                .security_amount
+                .saturating_add(self.amount)
+                .saturating_sub(self.receiver_due_amount);
+
+            self.env()
+                .transfer(self.sender, sender_amount)
+                .map_err(|_| Error::InvalidTransaction)?;
+
+            self.env()
+                .transfer(self.receiver, receiver_amount)
+                .map_err(|_| Error::InvalidTransaction)?;
+
+            #[cfg(not(test))]
+            self.env().terminate_contract(self.sender);
+            #[cfg(test)]
+            Ok(())
         }
 
         /// Finalizes the contract process based on the verification code provided by the receiver.
@@ -201,7 +252,7 @@ mod packa_pay {
             ink_env::hash_bytes::<ink_env::hash::Keccak256>(input.as_bytes(), &mut message_hash);
             let hash: Hash = message_hash.into();
             self.code = Some(hash);
-            self.status = Status::Funded;
+            self.status = Status::Signed;
 
             Self::env().emit_event(Signed {
                 from: caller,
@@ -309,6 +360,7 @@ mod packa_pay {
             // Sign contract
             ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
             assert_eq!(contract.sign("TEST".to_string()), Ok(()));
+            assert_eq!(contract.status, Status::Signed);
 
             // Settle contract
             let sender_balance =
@@ -334,7 +386,6 @@ mod packa_pay {
         fn test_origin_constructor() {
             let accounts = default_accounts();
             let sender = accounts.eve;
-            let receiver = accounts.bob;
 
             let amount = 100u128;
 
@@ -379,6 +430,10 @@ mod packa_pay {
                 Ok(())
             );
 
+            // Nobody should be able to break contract except sender
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(alice);
+            assert_eq!(contract.r#break(), Err(Error::NotAuthorized));
+
             // Nobody should be able to sign contract except sender
             ink_env::test::set_caller::<ink_env::DefaultEnvironment>(alice);
             assert_eq!(contract.sign("TEST".to_string()), Err(Error::NotAuthorized));
@@ -386,6 +441,12 @@ mod packa_pay {
             assert_eq!(contract.sign("TEST".to_string()), Err(Error::NotAuthorized));
             ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
             assert_eq!(contract.sign("TEST".to_string()), Ok(()));
+
+            // Nobody should be able to break signed contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(contract.r#break(), Err(Error::NotAuthorized));
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(contract.r#break(), Err(Error::NotAuthorized));
 
             // Nobody shoudle be able to settle contract except receiver
             ink_env::test::set_caller::<ink_env::DefaultEnvironment>(alice);
@@ -449,6 +510,83 @@ mod packa_pay {
             }
             ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
             assert_eq!(contract.sign("TEST".to_string()), Ok(()));
+        }
+
+        #[ink::test]
+        fn test_breaking() {
+            let accounts = default_accounts();
+            let sender = accounts.eve;
+            let receiver = accounts.bob;
+
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(sender, 100_000);
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(receiver, 100_000);
+
+            let amount = 100u128;
+            let security_amount = Perquintill::from_percent(20).mul(amount);
+
+            // Initiate contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            let mut contract = PackaPay::new(receiver, amount);
+            assert_eq!(contract.sender, sender);
+            assert_eq!(contract.receiver, receiver);
+
+            // Fund contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount),
+                Ok(())
+            );
+
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount + amount),
+                Ok(())
+            );
+
+            // Break contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(contract.r#break(), Ok(()));
+            assert_eq!(
+                ink_env::test::get_account_balance::<ink_env::DefaultEnvironment>(sender).unwrap(),
+                100_000
+            );
+            assert_eq!(
+                ink_env::test::get_account_balance::<ink_env::DefaultEnvironment>(receiver)
+                    .unwrap(),
+                100_000
+            );
+
+            // Initiate contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            let mut contract = PackaPay::new(receiver, amount);
+            assert_eq!(contract.sender, sender);
+            assert_eq!(contract.receiver, receiver);
+
+            // Fund contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount),
+                Ok(())
+            );
+
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(
+                ink_env::pay_with_call!(contract.fund(), security_amount + amount),
+                Ok(())
+            );
+
+            // Break contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(contract.r#break(), Ok(()));
+            assert_eq!(
+                ink_env::test::get_account_balance::<ink_env::DefaultEnvironment>(sender).unwrap(),
+                100_000
+            );
+            assert_eq!(
+                ink_env::test::get_account_balance::<ink_env::DefaultEnvironment>(receiver)
+                    .unwrap(),
+                100_000
+            );
         }
     }
 }
