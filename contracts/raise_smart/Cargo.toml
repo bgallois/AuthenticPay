@@ -1,0 +1,30 @@
+[package]
+name = "raise_smart"
+version = "0.1.0"
+authors = ["bgallois <benjamin@gallois.cc>"]
+edition = "2021"
+
+[dependencies]
+ink = { version = "5.0.0", default-features = false }
+ink_metadata = { version = "=5.0.0", default-features = false, optional = true }
+ink_env = { version = "=5.0.0", default-features = false }
+ink_prelude = { version = "=5.0.0", default-features = false }
+sp-arithmetic = { version = "23.0.0", default-features = false }
+
+[dev-dependencies]
+ink_e2e = { version = "5.0.0" }
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = ["std"]
+std = [
+    "ink/std",
+    "ink_env/std",
+    "ink_prelude/std",
+    "ink_metadata/std",
+    "sp-arithmetic/std",
+]
+ink-as-dependency = []
+e2e-tests = []
