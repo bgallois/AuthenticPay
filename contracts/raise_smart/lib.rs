@@ -50,6 +50,7 @@
 #[ink::contract]
 mod raise_smart {
     use ink::storage::Mapping;
+    use ink_prelude::vec::Vec;
 
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
@@ -122,7 +123,6 @@ mod raise_smart {
         /// This function can only be called by the beneficiary of the crowdfunding campaign.
         /// It performs the following actions based on whether the contract is in test mode or not:
         ///
-        #[ink(message)]
         #[ink(message)]
         pub fn close(&mut self) -> Result<()> {
             let caller = self.env().caller();
