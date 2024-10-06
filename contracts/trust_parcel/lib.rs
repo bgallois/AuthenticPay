@@ -178,7 +178,7 @@ mod trust_parcel {
         /// # Returns
         /// - `Option<Balance>`: Returns the caller's balance if it exists, or `None` if the caller has no balance.
         #[ink(message)]
-        pub fn get_balance(&mut self) -> Option<Balance> {
+        pub fn get_balance(&self) -> Option<Balance> {
             let caller = self.env().caller();
             self.balances.get(caller)
         }
@@ -191,7 +191,7 @@ mod trust_parcel {
         /// # Returns
         /// - `Option<u64>`: Returns the reputation score if it exists, or `None` if the account has no reputation score.
         #[ink(message)]
-        pub fn get_reputation(&mut self, account: AccountId) -> Option<u64> {
+        pub fn get_reputation(&self, account: AccountId) -> Option<u64> {
             self.reputations.get(account)
         }
 
@@ -256,7 +256,7 @@ mod trust_parcel {
         /// # Returns
         /// - `Option<Contract>`: Returns the `Contract` if it exists, or `None` if no contract with the given ID is found.
         #[ink(message)]
-        pub fn get_contract(&mut self, id: u128) -> Option<Contract> {
+        pub fn get_contract(&self, id: u128) -> Option<Contract> {
             self.contracts.get(id)
         }
 
@@ -269,7 +269,7 @@ mod trust_parcel {
         /// # Returns
         /// - `Vec<Contract>`: A vector of `Contract` instances matching the specified sender and receiver.
         #[ink(message)]
-        pub fn get_contracts(&mut self, sender: AccountId, receiver: AccountId) -> Vec<Contract> {
+        pub fn get_contracts(&self, sender: AccountId, receiver: AccountId) -> Vec<Contract> {
             let mut contracts = Vec::default();
             for i in 0..self.current_id {
                 if let Some(contract) = self.contracts.get(i) {

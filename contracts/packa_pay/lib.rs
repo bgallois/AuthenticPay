@@ -215,7 +215,7 @@ mod packa_pay {
         /// - If the caller is the `receiver`, it returns the `receiver_due_amount`.
         /// - `None`: If the caller is neither the `sender` nor the `receiver`, no amount is returned.
         #[ink(message)]
-        pub fn get_due_amount(&mut self) -> Option<Balance> {
+        pub fn get_due_amount(&self) -> Option<Balance> {
             let caller = self.env().caller();
             if caller == self.sender {
                 Some(self.sender_due_amount)

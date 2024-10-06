@@ -144,7 +144,7 @@ mod raise_smart {
         /// Returns the current gap between the fundraising objective and the amount raised.
         ///
         #[ink(message)]
-        pub fn get_gap(&mut self) -> Balance {
+        pub fn get_gap(&self) -> Balance {
             self.objective.saturating_sub(self.amount)
         }
 
