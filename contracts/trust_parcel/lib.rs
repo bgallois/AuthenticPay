@@ -271,7 +271,7 @@ mod trust_parcel {
         #[ink(message)]
         pub fn get_contracts(&self, sender: AccountId, receiver: AccountId) -> Vec<Contract> {
             let mut contracts = Vec::default();
-            for i in 0..self.current_id {
+            for i in 0..self.current_id.saturating_add(1) {
                 if let Some(contract) = self.contracts.get(i) {
                     if contract.sender == sender && contract.receiver == receiver {
                         contracts.push(contract);
@@ -279,6 +279,24 @@ mod trust_parcel {
                 }
             }
             contracts
+        }
+
+        /// Retrieves the last initiated contract associated with the caller.
+        ///
+        ///
+        /// # Returns
+        /// - `Option<Contract>`: The last initiated `Contract`.
+        #[ink(message)]
+        pub fn get_last_initiated_contract(&self) -> Option<Contract> {
+            let caller = self.env().caller();
+            for i in (0..self.current_id.saturating_add(1)).rev() {
+                if let Some(contract) = self.contracts.get(i) {
+                    if contract.sender == caller {
+                        return Some(contract);
+                    }
+                }
+            }
+            None
         }
 
         /// Funds a specified contract by allowing the caller to contribute to it.
@@ -706,6 +724,71 @@ mod trust_parcel {
             assert_eq!(contract.defund_account(), Ok(()));
             ink_env::test::set_caller::<ink_env::DefaultEnvironment>(alice);
             assert_eq!(contract.defund_account(), Err(Error::NotAuthorized));
+        }
+
+        #[ink::test]
+        fn test_getters() {
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(
+                ink_env::account_id::<ink_env::DefaultEnvironment>(),
+                0,
+            );
+
+            let accounts = default_accounts();
+            let sender = accounts.eve;
+            let receiver = accounts.bob;
+            let alice = accounts.alice;
+
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(sender, 1_000);
+            ink_env::test::set_account_balance::<ink_env::DefaultEnvironment>(receiver, 1_000);
+
+            // Initiate contract
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            let mut contract = TrustParcel::new();
+
+            // Add fund
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            ink_env::pay_with_call!(contract.fund_account(), 1_000);
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            ink_env::pay_with_call!(contract.fund_account(), 1_000);
+
+            let amount = 100u128;
+
+            // Initiate contract
+            assert_eq!(contract.get_contracts(sender, receiver).len(), 0);
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(contract.get_contract(1), None);
+            assert_eq!(contract.initiate_contract(receiver, amount), Ok(1));
+            assert!(contract.get_contract(1).is_some());
+            assert_eq!(
+                contract.get_contracts(sender, receiver),
+                vec!(contract.get_contract(1).unwrap())
+            );
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(
+                contract.get_last_initiated_contract(),
+                contract.get_contract(1)
+            );
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(contract.get_last_initiated_contract(), None);
+
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(contract.get_contract(2), None);
+            assert_eq!(contract.initiate_contract(receiver, amount), Ok(2));
+            assert!(contract.get_contract(2).is_some());
+            assert_eq!(
+                contract.get_contracts(sender, receiver),
+                vec!(
+                    contract.get_contract(1).unwrap(),
+                    contract.get_contract(2).unwrap()
+                )
+            );
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(sender);
+            assert_eq!(
+                contract.get_last_initiated_contract(),
+                contract.get_contract(2)
+            );
+            ink_env::test::set_caller::<ink_env::DefaultEnvironment>(receiver);
+            assert_eq!(contract.get_last_initiated_contract(), None);
         }
 
         #[ink::test]
